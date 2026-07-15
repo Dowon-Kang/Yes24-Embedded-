@@ -1,0 +1,6 @@
+{
+  "name": "도서 정보 대시보드 및 RAG 추천 챗봇",
+  "description": "IT 및 인공지능 관련 도서 150여 권에 대한 종합 대시보드 통계를 분석하고, Gemini-3.5-flash 모델과 검색 증강 생성(RAG) 기술을 결합하여 개인화 도서 추천을 제공하는 스마트 챗봇입니다.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
