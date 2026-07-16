@@ -1,6 +1,6 @@
 import express from 'express';
 import { createServer as createViteServer } from 'vite';
-import { GoogleGenAI } from '@google/genai';
+import { GoogleGenAI, Type } from '@google/genai';
 import dotenv from 'dotenv';
 import path from 'path';
 import { fileURLToPath } from 'url';
@@ -111,12 +111,133 @@ async function startServer() {
         topPublishers,
         topSellers,
         newBooks,
-        allBooks: booksList.slice(0, 150) // Send loaded books for search/filtering on client
+        allBooks: booksList // Send loaded books for search/filtering on client
       });
     } catch (err: any) {
       res.status(500).json({ error: err.message });
     }
   });
+
+  // Gemini Function Calling Declaration for price and sales index range analysis
+  const analyzeBooksByPriceAndSales = {
+    name: "analyzeBooksByPriceAndSales",
+    description: "도서 목록에서 가격 범위 및 판매지수 범위를 필터링하고 정렬 기준에 따라 해당 수치 범위와 도서들을 직접 정밀하게 계산해 정렬해 반환합니다. 가격(예: 2만원대 책, 15000원 이하 등)이나 판매지수(예: 판매지수 1만 이상 등)에 대한 구체적인 수치 필터링/정렬 질문이 들어오면 반드시 이 함수를 통해 직접 가격과 판매지수 범위를 계산하고 정렬하십시오.",
+    parameters: {
+      type: Type.OBJECT,
+      properties: {
+        minPrice: {
+          type: Type.NUMBER,
+          description: "필터링할 최소 가격 (원 단위, 예: 20000)"
+        },
+        maxPrice: {
+          type: Type.NUMBER,
+          description: "필터링할 최대 가격 (원 단위, 예: 30000)"
+        },
+        minSalesIndex: {
+          type: Type.NUMBER,
+          description: "필터링할 최소 판매지수 (예: 10000)"
+        },
+        maxSalesIndex: {
+          type: Type.NUMBER,
+          description: "필터링할 최대 판매지수 (예: 50000)"
+        },
+        sortBy: {
+          type: Type.STRING,
+          description: "도서 정렬 옵션: 'price_asc' (가격 낮은순), 'price_desc' (가격 높은순), 'salesIndex_asc' (판매지수 낮은순), 'salesIndex_desc' (판매지수 높은순)"
+        },
+        limit: {
+          type: Type.INTEGER,
+          description: "반환할 도서의 최대 개수 (기본값: 10)"
+        }
+      }
+    }
+  };
+
+  // Helper function to calculate ranges and statistics of books matching criteria
+  function executeAnalyzeBooks(args: {
+    minPrice?: number;
+    maxPrice?: number;
+    minSalesIndex?: number;
+    maxSalesIndex?: number;
+    sortBy?: 'price_asc' | 'price_desc' | 'salesIndex_asc' | 'salesIndex_desc';
+    limit?: number;
+  }) {
+    const minP = args.minPrice ?? 0;
+    const maxP = args.maxPrice ?? Infinity;
+    const minS = args.minSalesIndex ?? 0;
+    const maxS = args.maxSalesIndex ?? Infinity;
+    const limit = args.limit ?? 10;
+
+    // Filter books matching the criteria
+    const filtered = booksList.filter(b => {
+      return b.price >= minP && b.price <= maxP && b.salesIndex >= minS && b.salesIndex <= maxS;
+    });
+
+    // Calculate statistics of the filtered books *before* limiting
+    const count = filtered.length;
+    let totalPrice = 0;
+    let totalSalesIndex = 0;
+    let prices = filtered.map(b => b.price);
+    let salesIndexes = filtered.map(b => b.salesIndex);
+
+    filtered.forEach(b => {
+      totalPrice += b.price;
+      totalSalesIndex += b.salesIndex;
+    });
+
+    const avgPrice = count > 0 ? Math.round(totalPrice / count) : 0;
+    const avgSalesIndex = count > 0 ? Math.round(totalSalesIndex / count) : 0;
+    const minPriceFound = prices.length > 0 ? Math.min(...prices) : 0;
+    const maxPriceFound = prices.length > 0 ? Math.max(...prices) : 0;
+    const minSalesIndexFound = salesIndexes.length > 0 ? Math.min(...salesIndexes) : 0;
+    const maxSalesIndexFound = salesIndexes.length > 0 ? Math.max(...salesIndexes) : 0;
+
+    // Sort
+    if (args.sortBy) {
+      filtered.sort((a, b) => {
+        if (args.sortBy === 'price_asc') return a.price - b.price;
+        if (args.sortBy === 'price_desc') return b.price - a.price;
+        if (args.sortBy === 'salesIndex_asc') return a.salesIndex - b.salesIndex;
+        if (args.sortBy === 'salesIndex_desc') return b.salesIndex - a.salesIndex;
+        return 0;
+      });
+    } else {
+      // Default sort by salesIndex desc
+      filtered.sort((a, b) => b.salesIndex - a.salesIndex);
+    }
+
+    // Slice
+    const books = filtered.slice(0, limit);
+
+    return {
+      queryCriteria: {
+        minPrice: minP,
+        maxPrice: maxP === Infinity ? null : maxP,
+        minSalesIndex: minS,
+        maxSalesIndex: maxS === Infinity ? null : maxS,
+        sortBy: args.sortBy
+      },
+      statistics: {
+        matchedCount: count,
+        averagePrice: avgPrice,
+        averageSalesIndex: avgSalesIndex,
+        priceRange: { min: minPriceFound, max: maxPriceFound },
+        salesIndexRange: { min: minSalesIndexFound, max: maxSalesIndexFound }
+      },
+      books: books.map(b => ({
+        rank: b.rank,
+        title: b.title,
+        subtitle: b.subtitle,
+        author: b.author,
+        publisher: b.publisher,
+        pubDate: b.pubDate,
+        price: b.price,
+        cost: b.cost,
+        salesIndex: b.salesIndex,
+        link: b.link
+      }))
+    };
+  }
 
   // API 2: RAG Recommendation Chatbot
   app.post('/api/recommend', async (req, res) => {
@@ -208,25 +329,77 @@ ${bookContexts}
 
 이 데이터를 기반으로 사용자의 질문에 성실하게 답변하고 맞춤 도서를 추천해 주세요.`;
 
-      // 3. Generation Phase: Send request to Gemini API
+      // 3. Generation Phase: Send request to Gemini API (supporting function calling)
+      const contents: any[] = [
+        ...history.map((h: any) => ({
+          role: h.role === 'user' ? 'user' : 'model',
+          parts: [{ text: h.content }]
+        })),
+        { role: 'user', parts: [{ text: prompt }] }
+      ];
+
       const chatConfig: any = {
         model: 'gemini-3.5-flash',
-        contents: [
-          ...history.map((h: any) => ({
-            role: h.role === 'user' ? 'user' : 'model',
-            parts: [{ text: h.content }]
-          })),
-          { role: 'user', parts: [{ text: prompt }] }
-        ],
+        contents: contents,
         config: {
           systemInstruction,
-          temperature: 0.7
+          temperature: 0.7,
+          tools: [{ functionDeclarations: [analyzeBooksByPriceAndSales] }]
         }
       };
 
-      const response = await ai.models.generateContent(chatConfig);
-      const replyText = response.text || '추천 도서를 생성하는 데 실패했습니다.';
+      let response = await ai.models.generateContent(chatConfig);
 
+      // Check if function calling is triggered
+      if (response.functionCalls && response.functionCalls.length > 0) {
+        const call = response.functionCalls[0];
+        console.log("Gemini triggered function call:", call);
+
+        if (call.name === 'analyzeBooksByPriceAndSales') {
+          // Execute local book range/sorting statistics analysis
+          const functionResult = executeAnalyzeBooks(call.args as any);
+
+          // Append model's tool request turn
+          const modelTurn = response.candidates?.[0]?.content || {
+            role: 'model',
+            parts: [{ functionCall: call }]
+          };
+          contents.push(modelTurn);
+
+          // Append tool execution response
+          contents.push({
+            role: 'user',
+            parts: [{
+              functionResponse: {
+                name: call.name,
+                response: functionResult
+              }
+            }]
+          });
+
+          // Perform follow-up generation incorporating computed ranges
+          const followUpConfig: any = {
+            model: 'gemini-3.5-flash',
+            contents: contents,
+            config: {
+              systemInstruction: systemInstruction + `\n\n[중요 지시] 사용자가 가격이나 판매지수 관련 수치 분석을 요청하여 도구(analyzeBooksByPriceAndSales)를 실행했습니다.
+도구 응답에 들어 있는 통계 데이터(statistics)를 기반으로 **반드시 계산된 실제 수치 범위(예: '조회된 도서들의 가격 범위는 최소 ${functionResult.statistics.priceRange.min.toLocaleString()}원 ~ 최대 ${functionResult.statistics.priceRange.max.toLocaleString()}원(평균 ${functionResult.statistics.averagePrice.toLocaleString()}원)이며, 판매지수 범위는 최소 ${functionResult.statistics.salesIndexRange.min.toLocaleString()} ~ 최대 ${functionResult.statistics.salesIndexRange.max.toLocaleString()}(평균 ${functionResult.statistics.averageSalesIndex.toLocaleString()})입니다.')**를 포함하여 답변을 작성하고, 정렬 기준에 맞는 추천 도서들을 친절하게 소개해 주세요.`,
+              temperature: 0.5
+            }
+          };
+
+          const followUpResponse = await ai.models.generateContent(followUpConfig);
+          const replyText = followUpResponse.text || '추천 결과를 생성하는 데 실패했습니다.';
+
+          return res.json({
+            reply: replyText,
+            recommendedBooks: functionResult.books.slice(0, 5)
+          });
+        }
+      }
+
+      // Default non-tool route
+      const replyText = response.text || '추천 도서를 생성하는 데 실패했습니다.';
       res.json({
         reply: replyText,
         recommendedBooks: retrievedBooks
